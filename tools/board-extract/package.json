@@ -1,0 +1,44 @@
+{
+  "name": "board-extract",
+  "version": "2.5.0",
+  "private": true,
+  "description": "Screenshot of a stacked-tile board -> level model -> playable page -> side-by-side comparison.",
+  "type": "module",
+  "bin": {
+    "board-extract": "bin/board-extract.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "assets/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "run": "node bin/board-extract.mjs run",
+    "learn": "node bin/board-extract.mjs learn",
+    "eval": "node bin/board-extract.mjs eval",
+    "ci": "node scripts/ci.mjs"
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.65.1"
+  },
+  "exports": {
+    ".": "./src/pipeline.mjs",
+    "./invariants": "./src/invariants.mjs"
+  },
+  "keywords": [
+    "screenshot",
+    "level",
+    "reverse-engineering",
+    "tile-match",
+    "game"
+  ]
+}

@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#c0f888">
+<title>关卡复刻</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #c0f888; font-family: "Microsoft YaHei", system-ui, sans-serif; }
+  /* Fills a phone screen as readily as a desktop window: the canvas keeps its own coordinate
+     system and the browser scales it down, so tile geometry stays exactly as measured. */
+  body {
+    display: flex; justify-content: center; align-items: flex-start;
+    min-height: 100vh; min-height: 100dvh;
+  }
+  #wrap { width: min(720px, 100vw); padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  canvas { display: block; width: 100%; height: auto; touch-action: none; -webkit-user-select: none; user-select: none; }
+  #bar {
+    display: flex; gap: 10px; align-items: center; justify-content: center;
+    padding: 8px 12px 18px; font-size: 12px; color: #3d5220;
+  }
+  #bar button {
+    font: inherit; font-size: 13px; padding: 7px 16px; border-radius: 999px;
+    border: 1px solid #7d9455; background: #e7f6c9; color: #2f3f18; cursor: pointer;
+  }
+  #bar button:active { background: #cfe8a6; }
+  #bar button[disabled] { opacity: 0.45; }
+  @media (max-width: 480px) { #hint { display: none; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="bar">
+    <span id="hint">点最上面的牌 → 进下方槽位；三张同型消除；槽位满即失败</span>
+    <button id="undo" type="button">撤回</button>
+  </div>
+</div>
+<!--LEVEL-->
+<script>
+const LEVEL = window.LEVEL;
+const VIEW = window.VIEW || { scale: 720 / 1330, top: 56, width: 720, height: 1010 };
+const ICON = window.ICONS || { unknown: "❔" };
+const SLOTS = (LEVEL.board && LEVEL.board.slots) || 7;
+const SCALE = VIEW.scale, TOP = VIEW.top;
+// The card colours come from the capture, not from a hard-coded palette.
+const rgb = (c, k = 1) => `rgb(${c.map((v) => Math.max(0, Math.min(255, Math.round(v * k)))).join(",")})`;
+const FACE = VIEW.face ? rgb(VIEW.face) : "#f0f8c8";
+const COVERED = VIEW.dim ? rgb(VIEW.dim) : "#90987a";
+const EDGE = VIEW.face ? rgb(VIEW.face, 0.7) : "#5b6b4a";
+const EDGE_COVERED = VIEW.dim ? rgb(VIEW.dim, 0.7) : "#3f4a32";
+const BLOCK_OVERLAP = 0.05; // stacked tiles overlap by a tenth of a face; contact counts
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+// Logical size: every coordinate below is in these units, whatever the screen is.
+const W = VIEW.width || 720, H = VIEW.height || 1010;
+// Draw at the screen's own density so edges stay sharp on a phone, then scale back to logical units.
+const DPR = Math.min(window.devicePixelRatio || 1, 3);
+// A page should look like the game it was measured from, backdrop included.
+const BG = VIEW.background ? `rgb(${VIEW.background.join(",")})` : "#c0f888";
+document.body.style.background = BG;
+document.querySelector("meta[name=theme-color]")?.setAttribute("content", BG);
+canvas.width = Math.round(W * DPR);
+canvas.height = Math.round(H * DPR);
+ctx.scale(DPR, DPR);
+const SLOT_Y = H - 128, SLOT_H = 108;
+
+let tiles = [];
+let piles = [];
+let slots = [];
+let undo = [];
+let over = null;
+
+function layout() {
+  tiles = LEVEL.tiles.map((t, i) => ({
+    id: i + 1,
+    x: t.x * SCALE,
+    y: t.y * SCALE + TOP,
+    w: t.w * SCALE,
+    h: t.h * SCALE,
+    type: t.type,
+    z: Number.isFinite(t.z) ? t.z : (t.state === "clickable" ? 2 : 1) * 1000 + (t.x + t.y) / 2000,
+    at: null,
+    gone: false,
+  }));
+  // Side stacks: one spot, N tiles; only the top type is known, so the rest repeat it.
+  piles = (LEVEL.piles || []).map((p, i) => ({
+    id: `pile${i + 1}`,
+    x: p.x * SCALE,
+    y: p.y * SCALE + TOP,
+    w: 128 * SCALE,
+    h: 130 * SCALE,
+    type: p.top || "unknown",
+    count: p.including_top || 1,
+    z: 2000 + i,
+    at: null,
+    gone: false,
+  }));
+  tiles.sort((a, b) => a.z - b.z);
+}
+
+function overlap(a, b) {
+  const ow = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const oh = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  if (ow <= 0 || oh <= 0) return 0;
+  return (ow * oh) / Math.min(a.w * a.h, b.w * b.h);
+}
+
+// Tiles still on the board: one taken into the tray is off it, a pile shrinks as it is tapped.
+function boardLeft() {
+  return tiles.filter((t) => !t.gone && !t.at).length + piles.reduce((n, p) => n + (p.gone ? 0 : p.count), 0);
+}
+
+function clickable(t) {
+  if (t.gone || t.at) return false;
+  for (const o of tiles) {
+    if (o === t || o.gone || o.at) continue;
+    if (o.z > t.z && overlap(t, o) > BLOCK_OVERLAP) return false;
+  }
+  for (const p of piles) {
+    if (p !== t && !p.gone && p.z > t.z && overlap(t, p) > BLOCK_OVERLAP) return false;
+  }
+  return true;
+}
+
+// The tray has to fit inside the canvas: seven 96 px slots plus gaps are wider than a 720 page,
+// so the slot width is what gives way, never the page.
+function trayGeometry() {
+  const margin = 18, gap = 6;
+  const cw = Math.floor(Math.min(96, (W - margin * 2 - gap * (SLOTS - 1)) / SLOTS));
+  const total = SLOTS * cw + (SLOTS - 1) * gap;
+  const x0 = Math.round((W - total) / 2);
+  return { cw, gap, total, x0, left: x0 - 10, right: x0 + total + 10 };
+}
+
+function drawTile(t, dim) {
+  const r = 8;
+  ctx.beginPath();
+  ctx.moveTo(t.x + r, t.y);
+  ctx.arcTo(t.x + t.w, t.y, t.x + t.w, t.y + t.h, r);
+  ctx.arcTo(t.x + t.w, t.y + t.h, t.x, t.y + t.h, r);
+  ctx.arcTo(t.x, t.y + t.h, t.x, t.y, r);
+  ctx.arcTo(t.x, t.y, t.x + t.w, t.y, r);
+  ctx.closePath();
+  // The game dims a covered tile by multiplying its colours, not by laying black over it,
+  // so its icon stays readable. Same here.
+  ctx.fillStyle = dim ? COVERED : FACE;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = dim ? EDGE_COVERED : EDGE;
+  ctx.stroke();
+  ctx.globalAlpha = dim ? 0.85 : 1;
+  ctx.font = Math.round(t.w * 0.5) + "px system-ui";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(ICON[t.type] || ICON.unknown, t.x + t.w / 2, t.y + t.h / 2);
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#3d5220";
+  ctx.font = "bold 20px system-ui";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText((LEVEL.game || "") + " · " + (LEVEL.level || ""), 16, 28);
+  ctx.textAlign = "right";
+  // What is still on the board: tiles taken into the tray are off it, piles shrink as they are tapped.
+  ctx.fillText("剩余 " + boardLeft(), W - 16, 28);
+
+  for (const p of piles) {
+    if (p.gone) continue;
+    for (let i = p.count - 1; i >= 0; i--) {
+      drawTile({ x: p.x - i * 9, y: p.y, w: p.w, h: p.h, type: p.type }, i > 0);
+    }
+  }
+  for (const t of tiles) {
+    if (t.gone || t.at) continue;
+    drawTile(t, !clickable(t));
+  }
+
+  const { cw, gap, total, x0 } = trayGeometry();
+  ctx.fillStyle = "#8a5a2b";
+  ctx.fillRect(x0 - 10, SLOT_Y - 10, total + 20, SLOT_H + 20);
+  for (let i = 0; i < SLOTS; i++) {
+    const x = x0 + i * (cw + gap);
+    ctx.fillStyle = "#6d4520";
+    ctx.fillRect(x, SLOT_Y, cw, SLOT_H);
+    const t = slots[i];
+    if (t) {
+      ctx.font = "44px system-ui";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#fff";
+      ctx.fillText(ICON[t.type] || ICON.unknown, x + cw / 2, SLOT_Y + SLOT_H / 2);
+    }
+  }
+
+  if (over) {
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 42px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(over, W / 2, H / 2);
+  }
+  const undoButton = document.getElementById("undo");
+  if (undoButton) undoButton.disabled = undo.length === 0;
+}
+
+function settle() {
+  const byType = {};
+  for (const t of slots) (byType[t.type] = byType[t.type] || []).push(t);
+  for (const type of Object.keys(byType)) {
+    if (byType[type].length >= 3) {
+      const three = byType[type].slice(0, 3);
+      slots = slots.filter((t) => !three.includes(t));
+      for (const t of three) t.gone = true;
+      return settle();
+    }
+  }
+  if (slots.length >= SLOTS) over = "槽位已满 · 失败";
+  else if (tiles.every((t) => t.gone) && piles.every((p) => p.gone)) over = "通关";
+}
+
+// One entry point for mouse and finger: pointerdown fires for both, and touch-action:none on the
+// canvas stops the page from scrolling or zooming instead of taking the tap.
+function tap(clientX, clientY) {
+  if (over) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = (clientX - rect.left) * (W / rect.width);
+  const my = (clientY - rect.top) * (H / rect.height);
+  const hit = (t) => mx >= t.x && mx <= t.x + t.w && my >= t.y && my <= t.y + t.h;
+  const candidates = tiles.filter((t) => !t.gone && !t.at && clickable(t) && hit(t)).sort((a, b) => b.z - a.z);
+  const pile = piles.filter((p) => !p.gone && hit(p)).sort((a, b) => b.z - a.z)[0];
+  if (pile && (!candidates[0] || pile.z > candidates[0].z)) {
+    pile.count -= 1;
+    if (pile.count <= 0) pile.gone = true;
+    slots.push({ type: pile.type, gone: false, at: "slot" });
+    undo.push({ kind: "pile", ref: pile });
+  } else if (candidates[0]) {
+    const t = candidates[0];
+    t.at = "slot";
+    slots.push(t);
+    undo.push({ kind: "tile", ref: t });
+  } else return;
+  settle();
+  draw();
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  tap(e.clientX, e.clientY);
+});
+
+function stepBack() {
+  if (over) return;
+  const last = undo.pop();
+  if (!last) return;
+  slots.pop();
+  if (last.kind === "pile") { last.ref.count += 1; last.ref.gone = false; }
+  else last.ref.at = null;
+  draw();
+}
+
+// Z for a keyboard, the button for a phone.
+window.addEventListener("keydown", (e) => {
+  if (e.key === "z" || e.key === "Z") stepBack();
+});
+document.getElementById("undo").addEventListener("click", (e) => {
+  e.preventDefault();
+  stepBack();
+});
+
+layout();
+draw();
+
+// Read-only handle for automated checks: where the clickable tiles are, and how full the tray is.
+// It exposes nothing that changes the game, so a test can drive it without a back door.
+window.__board = {
+  size: { w: W, h: H },
+  state: () => ({ slots: slots.length, types: slots.map((t) => t.type), over, left: boardLeft() }),
+  clickable: () => tiles.filter((t) => clickable(t)).map((t) => ({ x: t.x + t.w / 2, y: t.y + t.h / 2, type: t.type })),
+  tray: trayGeometry,
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "x": 175,
+    "y": 1200,
+    "edges_visible": 10,
+    "including_top": 11,
+    "top": "brush",
+    "note": "side-view stack: 10 tile edges plus the top face; hidden tiles' types unknown"
+  },
+  {
+    "id": 2,
+    "x": 962,
+    "y": 1200,
+    "edges_visible": 8,
+    "including_top": 9,
+    "top": "milk",
+    "note": "side-view stack: 8 tile edges plus the top face; hidden tiles' types unknown"
+  }
+]
